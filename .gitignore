@@ -1,0 +1,14 @@
+# Windows 탐색기가 만드는 파일
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# 편집기
+.vscode/
+.idea/
+*.swp
+
+# 로컬 전용 설정 (혹시 API 키를 파일로 빼게 되면 여기에)
+secrets.*
+*.local.js
+.env
