@@ -1,0 +1,183 @@
+-- ============================================================
+--  AI 오피스 — 데이터베이스 설계도
+--  Supabase 대시보드 > SQL Editor 에 통째로 붙여넣고 RUN
+--  여러 번 실행해도 안전합니다 (if not exists / drop policy 사용)
+-- ============================================================
+
+
+-- ─────────────────────────────────────────────
+-- 1. 표(테이블) 만들기
+-- ─────────────────────────────────────────────
+
+-- 회의실 하나 = rooms 한 줄
+create table if not exists public.rooms (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null default '새 회의실',
+  owner_id    uuid not null references auth.users(id) on delete cascade,
+  mode        text not null default 'meeting',   -- meeting|pipeline|workspace|compare
+  doc         text not null default '',          -- 공유 문서 내용
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+
+-- 그 회의실에 초대된 사람들
+create table if not exists public.room_members (
+  room_id     uuid not null references public.rooms(id) on delete cascade,
+  user_id     uuid not null references auth.users(id)  on delete cascade,
+  created_at  timestamptz not null default now(),
+  primary key (room_id, user_id)
+);
+
+-- 대화 한 줄 = messages 한 줄
+create table if not exists public.messages (
+  id           uuid primary key default gen_random_uuid(),
+  room_id      uuid not null references public.rooms(id) on delete cascade,
+  author_type  text not null,          -- 'user' | 'agent' | 'system'
+  author_name  text not null default '',
+  author_color text,
+  tag          text,
+  user_id      uuid references auth.users(id) on delete set null,
+  content      text not null default '',
+  created_at   timestamptz not null default now()
+);
+
+-- 그 회의실의 AI 참가자 설정
+create table if not exists public.agents (
+  id            uuid primary key default gen_random_uuid(),
+  room_id       uuid not null references public.rooms(id) on delete cascade,
+  name          text not null,
+  provider      text not null,          -- claude | gpt | gemini
+  model         text not null,
+  system_prompt text not null default '',
+  color         text not null default '#7b61ff',
+  enabled       boolean not null default true,
+  sort_order    int not null default 0
+);
+
+-- 조회 속도용 색인
+create index if not exists messages_room_time_idx on public.messages (room_id, created_at);
+create index if not exists agents_room_idx        on public.agents (room_id, sort_order);
+create index if not exists members_user_idx       on public.room_members (user_id);
+
+
+-- ─────────────────────────────────────────────
+-- 2. 접근 권한 판정 함수
+--    "이 사람이 이 회의실에 들어갈 자격이 있나?"
+--    security definer 라서 아래 규칙들이 서로 물고 늘어지지 않습니다.
+-- ─────────────────────────────────────────────
+
+create or replace function public.can_access_room(p_room uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (select 1 from public.rooms        r where r.id = p_room and r.owner_id = auth.uid())
+      or exists (select 1 from public.room_members m where m.room_id = p_room and m.user_id = auth.uid());
+$$;
+
+revoke all on function public.can_access_room(uuid) from public;
+grant execute on function public.can_access_room(uuid) to authenticated;
+
+
+-- ─────────────────────────────────────────────
+-- 3. RLS 켜기
+--    이걸 켜면 기본이 "전부 차단" 이 되고,
+--    아래에서 허용할 것만 하나씩 열어줍니다.
+-- ─────────────────────────────────────────────
+
+alter table public.rooms        enable row level security;
+alter table public.room_members enable row level security;
+alter table public.messages     enable row level security;
+alter table public.agents       enable row level security;
+
+
+-- ─────────────────────────────────────────────
+-- 4. 허용 규칙
+-- ─────────────────────────────────────────────
+
+-- rooms ------------------------------------------------------
+drop policy if exists rooms_select on public.rooms;
+create policy rooms_select on public.rooms for select to authenticated
+  using (owner_id = auth.uid() or public.can_access_room(id));
+
+drop policy if exists rooms_insert on public.rooms;
+create policy rooms_insert on public.rooms for insert to authenticated
+  with check (owner_id = auth.uid());          -- 남의 이름으로 못 만듦
+
+drop policy if exists rooms_update on public.rooms;
+create policy rooms_update on public.rooms for update to authenticated
+  using (public.can_access_room(id))           -- 참여자면 문서 수정 가능
+  with check (owner_id = auth.uid() or public.can_access_room(id));
+
+drop policy if exists rooms_delete on public.rooms;
+create policy rooms_delete on public.rooms for delete to authenticated
+  using (owner_id = auth.uid());               -- 삭제는 방장만
+
+-- room_members -----------------------------------------------
+drop policy if exists members_select on public.room_members;
+create policy members_select on public.room_members for select to authenticated
+  using (user_id = auth.uid() or public.can_access_room(room_id));
+
+drop policy if exists members_insert on public.room_members;
+create policy members_insert on public.room_members for insert to authenticated
+  with check (exists (select 1 from public.rooms r
+                      where r.id = room_id and r.owner_id = auth.uid()));
+
+drop policy if exists members_delete on public.room_members;
+create policy members_delete on public.room_members for delete to authenticated
+  using (user_id = auth.uid()                  -- 스스로 나가기
+      or exists (select 1 from public.rooms r
+                 where r.id = room_id and r.owner_id = auth.uid()));
+
+-- messages ---------------------------------------------------
+drop policy if exists messages_select on public.messages;
+create policy messages_select on public.messages for select to authenticated
+  using (public.can_access_room(room_id));
+
+drop policy if exists messages_insert on public.messages;
+create policy messages_insert on public.messages for insert to authenticated
+  with check (public.can_access_room(room_id));
+
+drop policy if exists messages_update on public.messages;
+create policy messages_update on public.messages for update to authenticated
+  using (public.can_access_room(room_id));     -- AI 답변 스트리밍 중 갱신
+
+drop policy if exists messages_delete on public.messages;
+create policy messages_delete on public.messages for delete to authenticated
+  using (exists (select 1 from public.rooms r
+                 where r.id = room_id and r.owner_id = auth.uid()));
+
+-- agents -----------------------------------------------------
+drop policy if exists agents_all on public.agents;
+create policy agents_all on public.agents for all to authenticated
+  using (public.can_access_room(room_id))
+  with check (public.can_access_room(room_id));
+
+
+-- ─────────────────────────────────────────────
+-- 5. 실시간(Realtime) 켜기
+--    다른 사람 화면에 즉시 반영되게 합니다.
+-- ─────────────────────────────────────────────
+
+alter table public.messages replica identity full;
+alter table public.rooms    replica identity full;
+
+do $$
+begin
+  begin execute 'alter publication supabase_realtime add table public.messages'; exception when duplicate_object then null; end;
+  begin execute 'alter publication supabase_realtime add table public.rooms';    exception when duplicate_object then null; end;
+end $$;
+
+
+-- ─────────────────────────────────────────────
+-- 6. 확인
+-- ─────────────────────────────────────────────
+
+select tablename,
+       rowsecurity as "RLS 켜짐"
+from pg_tables
+where schemaname = 'public'
+  and tablename in ('rooms','room_members','messages','agents')
+order by tablename;
