@@ -6,9 +6,9 @@
 //
 //  보안: 로그인한 사용자만 호출할 수 있습니다.
 //        ALLOWED_EMAILS 를 지정하면 그 사람들만 쓸 수 있습니다.
+//
+//  외부 라이브러리를 쓰지 않습니다 (배포 실패 위험 최소화).
 // ============================================================
-
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -22,25 +22,35 @@ const json = (body: unknown, status = 200) =>
     headers: { ...CORS, "content-type": "application/json" },
   });
 
+// Supabase 가 자동으로 넣어주는 환경변수. 버전에 따라 이름이 달라 여러 개를 시도합니다.
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
+const PUBLIC_KEY =
+  Deno.env.get("SUPABASE_ANON_KEY") ??
+  Deno.env.get("SUPABASE_PUBLISHABLE_KEY") ??
+  Deno.env.get("SUPABASE_PUBLISHABLE_OR_ANON_KEY") ??
+  "";
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (req.method !== "POST") return json({ error: "POST 만 허용됩니다" }, 405);
 
   // ── 1. 로그인 확인 ────────────────────────────────────────
   const authHeader = req.headers.get("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
+  if (!authHeader.toLowerCase().startsWith("bearer ")) {
     return json({ error: "로그인이 필요합니다." }, 401);
   }
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_ANON_KEY")!,
-    { global: { headers: { Authorization: authHeader } } },
-  );
-
-  const { data: { user }, error: authError } = await supabase.auth.getUser();
-  if (authError || !user) {
-    return json({ error: "로그인이 유효하지 않습니다." }, 401);
+  let email = "";
+  try {
+    const who = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { Authorization: authHeader, apikey: PUBLIC_KEY },
+    });
+    if (!who.ok) return json({ error: "로그인이 유효하지 않습니다. 다시 로그인해 주세요." }, 401);
+    const u = await who.json();
+    email = String(u?.email ?? "").toLowerCase();
+    if (!u?.id) return json({ error: "로그인이 유효하지 않습니다." }, 401);
+  } catch (e) {
+    return json({ error: "로그인 확인 실패: " + (e instanceof Error ? e.message : String(e)) }, 500);
   }
 
   // ── 2. 허용된 사람인지 확인 (요금 폭탄 방지) ──────────────
@@ -50,15 +60,12 @@ Deno.serve(async (req) => {
   const allowList = (Deno.env.get("ALLOWED_EMAILS") ?? "")
     .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 
-  if (allowList.length > 0 && !allowList.includes((user.email ?? "").toLowerCase())) {
-    return json({ error: "이 앱을 사용할 권한이 없습니다. 관리자에게 문의하세요." }, 403);
+  if (allowList.length > 0 && !allowList.includes(email)) {
+    return json({ error: `이 앱을 사용할 권한이 없습니다 (${email}). 관리자에게 문의하세요.` }, 403);
   }
 
   // ── 3. 요청 내용 읽기 ─────────────────────────────────────
-  let body: {
-    provider?: string; model?: string; system?: string;
-    user?: string; effort?: string;
-  };
+  let body: { provider?: string; model?: string; system?: string; user?: string; effort?: string };
   try {
     body = await req.json();
   } catch {
@@ -72,6 +79,7 @@ Deno.serve(async (req) => {
   const effort   = body.effort ?? "medium";
 
   if (!prompt.trim()) return json({ error: "보낼 내용이 비어 있습니다." }, 400);
+  if (!model.trim())  return json({ error: "모델명이 비어 있습니다." }, 400);
 
   // ── 4. 제공사별 호출 ──────────────────────────────────────
   try {
@@ -79,7 +87,7 @@ Deno.serve(async (req) => {
 
     if (provider === "claude") {
       const key = Deno.env.get("ANTHROPIC_API_KEY");
-      if (!key) return json({ error: "서버에 Anthropic 키가 설정되지 않았습니다." }, 500);
+      if (!key) return json({ error: "서버에 ANTHROPIC_API_KEY 가 설정되지 않았습니다." }, 500);
 
       const payload: Record<string, unknown> = {
         model,
@@ -88,7 +96,7 @@ Deno.serve(async (req) => {
         messages: [{ role: "user", content: prompt }],
         stream: true,
       };
-      // effort 는 Haiku 계열에서 지원하지 않습니다.
+      // effort 는 Haiku 계열이 지원하지 않습니다.
       if (!/haiku/i.test(model)) payload.output_config = { effort };
 
       upstream = await fetch("https://api.anthropic.com/v1/messages", {
@@ -103,7 +111,7 @@ Deno.serve(async (req) => {
 
     } else if (provider === "gpt") {
       const key = Deno.env.get("OPENAI_API_KEY");
-      if (!key) return json({ error: "서버에 OpenAI 키가 설정되지 않았습니다." }, 500);
+      if (!key) return json({ error: "서버에 OPENAI_API_KEY 가 설정되지 않았습니다." }, 500);
 
       upstream = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -117,7 +125,7 @@ Deno.serve(async (req) => {
 
     } else if (provider === "gemini") {
       const key = Deno.env.get("GEMINI_API_KEY");
-      if (!key) return json({ error: "서버에 Gemini 키가 설정되지 않았습니다." }, 500);
+      if (!key) return json({ error: "서버에 GEMINI_API_KEY 가 설정되지 않았습니다." }, 500);
 
       upstream = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`,
