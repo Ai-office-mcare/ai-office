@@ -12,3 +12,6 @@ $RECYCLE.BIN/
 secrets.*
 *.local.js
 .env
+
+# PHASE 4 검증용 임시 페이지 (저장소에 올리지 않음)
+test-ai-proxy.html
