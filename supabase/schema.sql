@@ -94,6 +94,30 @@ alter table public.agents       enable row level security;
 
 
 -- ─────────────────────────────────────────────
+-- 3-B. 표 접근 권한 부여 (GRANT)
+--
+--   RLS 와 GRANT 는 서로 다른 자물쇠입니다.
+--     GRANT = "이 역할이 이 표를 건드릴 수 있나?"  (문 자체)
+--     RLS   = "그중 어떤 줄을 볼 수 있나?"          (문 안의 칸막이)
+--   둘 다 열려야 접근됩니다.
+--
+--   프로젝트 생성 시 'Automatically expose new tables' 를 껐다면
+--   이 GRANT 가 자동으로 붙지 않아 42501 오류가 납니다. 그래서 직접 부여합니다.
+--
+--   ※ anon(비로그인) 에게는 아무 권한도 주지 않습니다 — 로그인한 사람만 사용.
+-- ─────────────────────────────────────────────
+
+grant usage on schema public to authenticated;
+
+grant select, insert, update, delete on
+  public.rooms,
+  public.room_members,
+  public.messages,
+  public.agents
+to authenticated;
+
+
+-- ─────────────────────────────────────────────
 -- 4. 허용 규칙
 -- ─────────────────────────────────────────────
 
@@ -175,9 +199,15 @@ end $$;
 -- 6. 확인
 -- ─────────────────────────────────────────────
 
-select tablename,
-       rowsecurity as "RLS 켜짐"
-from pg_tables
-where schemaname = 'public'
-  and tablename in ('rooms','room_members','messages','agents')
-order by tablename;
+-- RLS 가 켜졌는지 + 권한이 붙었는지 한 번에 확인
+select
+  t.tablename                                   as "표",
+  t.rowsecurity                                 as "RLS 켜짐",
+  has_table_privilege('authenticated', 'public.'||t.tablename, 'SELECT') as "읽기 권한",
+  has_table_privilege('authenticated', 'public.'||t.tablename, 'INSERT') as "쓰기 권한"
+from pg_tables t
+where t.schemaname = 'public'
+  and t.tablename in ('rooms','room_members','messages','agents')
+order by t.tablename;
+
+-- 위 4줄이 모두 true / true / true 면 정상입니다.
