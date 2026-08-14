@@ -181,6 +181,53 @@ create policy agents_all on public.agents for all to authenticated
 
 
 -- ─────────────────────────────────────────────
+-- 4-B. 최소 권한 보강 — 방의 중요 필드 잠그기
+--
+--   rooms_update 정책은 "참여자도 방을 수정할 수 있다"로 열려 있습니다.
+--   공유 문서(doc)를 함께 편집하기 위해 필요한 권한입니다.
+--   그런데 그대로 두면 참여자가 방 이름·모드까지 바꿀 수 있습니다.
+--
+--   RLS 정책은 '어떤 줄'만 가릴 뿐 '어떤 칸'은 못 가립니다.
+--   그래서 트리거로 칸 단위 제한을 겁니다.
+--
+--     방장   → 전부 수정 가능
+--     참여자 → doc / updated_at 만 수정 가능
+-- ─────────────────────────────────────────────
+
+create or replace function public.rooms_guard()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- 방장은 제한 없음
+  if old.owner_id = auth.uid() then
+    return new;
+  end if;
+
+  -- 참여자: 보호 대상 칸이 바뀌면 거부
+  if new.id         is distinct from old.id
+  or new.owner_id   is distinct from old.owner_id
+  or new.name       is distinct from old.name
+  or new.mode       is distinct from old.mode
+  or new.created_at is distinct from old.created_at then
+    raise exception '방 이름·모드·소유자는 방장만 변경할 수 있습니다.'
+      using errcode = '42501';
+  end if;
+
+  return new;
+end $$;
+
+revoke all on function public.rooms_guard() from public;
+
+drop trigger if exists rooms_guard_trg on public.rooms;
+create trigger rooms_guard_trg
+  before update on public.rooms
+  for each row execute function public.rooms_guard();
+
+
+-- ─────────────────────────────────────────────
 -- 5. 실시간(Realtime) 켜기
 --    다른 사람 화면에 즉시 반영되게 합니다.
 -- ─────────────────────────────────────────────
@@ -199,7 +246,7 @@ end $$;
 -- 6. 확인
 -- ─────────────────────────────────────────────
 
--- RLS 가 켜졌는지 + 권한이 붙었는지 한 번에 확인
+-- (1) RLS 가 켜졌는지 + 권한이 붙었는지
 select
   t.tablename                                   as "표",
   t.rowsecurity                                 as "RLS 켜짐",
@@ -209,5 +256,11 @@ from pg_tables t
 where t.schemaname = 'public'
   and t.tablename in ('rooms','room_members','messages','agents')
 order by t.tablename;
+-- ↑ 4줄 모두 true / true / true 여야 정상입니다.
 
--- 위 4줄이 모두 true / true / true 면 정상입니다.
+-- (2) 보호 트리거가 걸렸는지
+select tgname as "트리거", tgenabled as "활성"
+from pg_trigger
+where tgrelid = 'public.rooms'::regclass
+  and not tgisinternal;
+-- ↑ rooms_guard_trg / O 로 나와야 정상입니다.
