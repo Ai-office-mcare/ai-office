@@ -96,6 +96,29 @@ https://ai-office-mcare.github.io/ai-office/
 정리 과정에서 **안전규칙·미해결 문제·기존 기능 보호 조건·백업 위치·복구 방법·대표 결정사항**은
 절대 삭제하거나 잊지 않습니다.
 
+### 인수인계 절차는 별도 규칙을 따른다 ★
+
+**장시간 작업으로 대화가 길어졌거나, 큰 작업 하나가 완료되었으면
+`C:\Users\home\mcare-runner\HANDOFF-RULES.md` 를 읽고 그 절차를 따릅니다.**
+
+특히 다음을 반드시 지킵니다.
+
+- **작업 중에는 인수인계하지 않습니다.** (파일 쓰는 중 · git 명령 중 · 테스트 중 ·
+  배포 중 · DB 변경 중 · 결과 미확인 · rollback 판단 필요 상태)
+- 안전한 중단 지점에서만 정리하고, 정리한 기록은 **실제 상태와 대조해 검증**합니다.
+- **Claude 가 스스로 `/clear` 하거나 새 세션을 열지 않습니다.**
+  준비가 끝나면 `[새 세션 전환 준비 완료]` 라고 알리고 **멈춥니다.** 전환은 대표가 승인합니다.
+
+도구:
+
+```
+handoff.ps1 -Check     지금 넘겨도 안전한지 판정
+handoff.ps1 -Write     HANDOFF/WORKLOG 갱신 + 실제 상태 대조
+handoff.ps1 -Resume    새 세션에서 복구 (항상 이것부터)
+```
+
+**새 세션의 첫 작업은 항상 `handoff.ps1 -Resume` 입니다.**
+
 ---
 
 ## 5. 보고 방식
@@ -131,6 +154,8 @@ https://ai-office-mcare.github.io/ai-office/
 | 문서 | 내용 |
 |---|---|
 | `docs/MCARE-WEB-STANDARD.md` | **홈페이지 제작 표준 v1.0** — 웹 작업 시 필독 |
+| `C:\Users\home\mcare-runner\HANDOFF-RULES.md` | **인수인계 운영규칙 v1.0** — 장시간 작업·세션 전환 시 필독 |
+| `C:\Users\home\mcare-runner\HANDOFF.md` | 현재 인수인계 상태 (새 세션이 가장 먼저 읽음) |
 | `README.md` | 앱 사용법 |
 | `AI오피스-브리핑.md` | 앱 구조 설명 (외부 AI 전달용) |
 | `C:\Users\home\mcare-runner\WORKLOG.md` | 자동화 구축 진행 기록 (저장소 밖) |
